@@ -1,0 +1,74 @@
+{
+  "products": [
+    {
+      "name": "Gree AC 1 Ton Inverter",
+      "category": "AC",
+      "listedPrice": 95000,
+      "floorPrice": 82000,
+      "description": "1 Ton, Inverter, Heat & Cool, Energy Saver"
+    },
+    {
+      "name": "Gree AC 1.5 Ton Inverter",
+      "category": "AC",
+      "listedPrice": 115000,
+      "floorPrice": 98000,
+      "description": "1.5 Ton, Inverter, Heat & Cool, 5 Star Rating"
+    },
+    {
+      "name": "Haier AC 1.5 Ton",
+      "category": "AC",
+      "listedPrice": 105000,
+      "floorPrice": 90000,
+      "description": "1.5 Ton, Inverter, WiFi Control, Auto Clean"
+    },
+    {
+      "name": "Samsung 43 inch Smart TV",
+      "category": "TV",
+      "listedPrice": 85000,
+      "floorPrice": 72000,
+      "description": "43 inch, 4K UHD, Smart TV, WiFi, HDMI x3"
+    },
+    {
+      "name": "Sony Bravia 43 inch",
+      "category": "TV",
+      "listedPrice": 135000,
+      "floorPrice": 118000,
+      "description": "43 inch, 4K, Android TV, Dolby Audio, Google TV"
+    },
+    {
+      "name": "TCL 55 inch Smart TV",
+      "category": "TV",
+      "listedPrice": 95000,
+      "floorPrice": 82000,
+      "description": "55 inch, 4K, Android TV, HDR, HDMI x3"
+    },
+    {
+      "name": "Dawlance Refrigerator 14 CFT",
+      "category": "Fridge",
+      "listedPrice": 65000,
+      "floorPrice": 55000,
+      "description": "14 CFT, Double Door, Inverter, No Frost"
+    },
+    {
+      "name": "Haier Refrigerator 16 CFT",
+      "category": "Fridge",
+      "listedPrice": 78000,
+      "floorPrice": 66000,
+      "description": "16 CFT, Double Door, Inverter, Glass Door"
+    },
+    {
+      "name": "Samsung Washing Machine 8kg",
+      "category": "Washing Machine",
+      "listedPrice": 55000,
+      "floorPrice": 46000,
+      "description": "8kg, Fully Automatic, Front Load, Inverter"
+    },
+    {
+      "name": "Haier Washing Machine 10kg",
+      "category": "Washing Machine",
+      "listedPrice": 62000,
+      "floorPrice": 52000,
+      "description": "10kg, Fully Automatic, Top Load, Steam Wash"
+    }
+  ]
+}
