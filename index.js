@@ -4,365 +4,130 @@ const { GoogleGenerativeAI } = require('@google/generative-ai');
 const pino = require('pino');
 const express = require('express');
 const fs = require('fs');
+const path = require('path');
 const cron = require('node-cron');
 require('dotenv').config();
 
-// =====================================================
-//  CONFIG
-// =====================================================
-const GEMINI_API_KEY = process.env.GEMINI_API_KEY || "YOUR_GEMINI_API_KEY_HERE";
-const MODEL_NAME = "gemini-3.5-flash-lite"; // 500 free req/day
-const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
-const OWNER_NUMBER = process.env.OWNER_NUMBER || "923350316442"; // Shop owner's number
+const MASTER_PASSWORD = process.env.MASTER_PASSWORD || 'master123';
+const DEFAULT_GEMINI_KEY = process.env.GEMINI_API_KEY;
+const PORT = process.env.PORT || 3000;
+const qrcodeWeb = require('qrcode');
 
-// =====================================================
-//  PRODUCT DATABASE
-// =====================================================
-let productDB = { products: [] };
-try {
-    productDB = JSON.parse(fs.readFileSync('./products.json', 'utf8'));
-} catch(e) { console.error("products.json not found"); }
+// ── Client Registry (RAM mein sab bots) ──
+const clientBots = {};
+const masterSessions = new Set();
+const clientSessions = {};
 
-function buildProductCatalog() {
-    return productDB.products.map(p => {
-        const stockStatus = p.in_stock ? "Available" : "Out of Stock";
-        return `- [ID: ${p.id}] ${p.name}: Demand Rs.${p.demand_price.toLocaleString()} | Floor Rs.${p.floor_price.toLocaleString()} | ${p.specs} | Status: ${stockStatus}`;
-    }).join('\n');
-}
-
-// =====================================================
-//  CRM - Customer Database
-// =====================================================
-const crmFile = './customer_crm.json';
-let customerCRM = {};
-if (fs.existsSync(crmFile)) {
-    try { customerCRM = JSON.parse(fs.readFileSync(crmFile, 'utf8')); }
-    catch (e) { console.error("CRM read error:", e.message); }
-}
-function saveCRM() {
-    fs.writeFileSync(crmFile, JSON.stringify(customerCRM, null, 2));
-}
-
-function parseCRMTag(text, userId) {
-    const match = text.match(/\[CRM:([^\]]*)\]/);
-    if (!match) return text;
-
-    const data = match[1];
-    if (!customerCRM[userId]) customerCRM[userId] = {};
-
-    const name     = data.match(/name=([^,\]]+)/);
-    const loc      = data.match(/location=([^,\]]+)/);
-    const purchase = data.match(/purchase=([^,\]]+)/);
-
-    if (name)     customerCRM[userId].name = name[1].trim();
-    if (loc)      customerCRM[userId].location = loc[1].trim();
-    if (purchase) {
-        let ex = customerCRM[userId].past_purchases;
-        customerCRM[userId].past_purchases = ex ? ex + ", " + purchase[1].trim() : purchase[1].trim();
-    }
-
-    if (name || loc || purchase) {
-        saveCRM();
-        console.log(`\n💾 [CRM] Updated for ${userId}:`, customerCRM[userId]);
-    }
-    return text.replace(/\[CRM:[^\]]*\]/g, '').trim();
-}
-
-function generateCSVReport() {
-    let csv = "Phone,Name,Location,PastPurchases\n";
-    for (const [phone, data] of Object.entries(customerCRM)) {
-        // Basic escaping to prevent CSV breakage from commas
-        const safeName = (data.name || '').replace(/,/g, ' ');
-        const safeLoc = (data.location || '').replace(/,/g, ' ');
-        const safePur = (data.past_purchases || '').replace(/,/g, ' ');
-        csv += `${phone},${safeName},${safeLoc},${safePur}\n`;
-    }
-    const filePath = './daily_report.csv';
-    fs.writeFileSync(filePath, csv);
-    return filePath;
-}
-
-// =====================================================
-//  RESPONSE CLEANER
-// =====================================================
-function cleanResponse(text) {
-    const lines = text.split('\n');
-    const replyLines = lines.filter(line => {
-        const t = line.trim();
-        if (!t) return false;
-        // Don't filter out bold text (**Text**), only filter standalone bullet points if needed, 
-        // but it's safer to just let asterisks pass.
-        if (t.startsWith('•') || t.startsWith('·')) return false;
-        if (/^(context:|role:|style:|note:|task:|goal:|user said|user wants|the user|i should|i need|i will|i already|thinking:|step \d)/i.test(t)) return false;
-        return true;
+// ── Load all clients from /clients folder ──
+function loadClients() {
+    const dir = './clients';
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir);
+    return fs.readdirSync(dir).filter(id => {
+        return fs.existsSync(path.join(dir, id, 'config.json'));
+    }).map(id => {
+        return JSON.parse(fs.readFileSync(path.join(dir, id, 'config.json'), 'utf8'));
     });
-    return replyLines.join('\n').trim() || "Assalam o Alaikum! Aapki kya madad kar sakta hoon? 😊";
 }
 
-// =====================================================
-//  SYSTEM PROMPT - Shopkeeper with Negotiation Rules
-// =====================================================
-function getSystemPrompt(userId) {
-    const profile = customerCRM[userId];
-    let crmNote = '';
-    if (profile && (profile.name || profile.past_purchases)) {
-        crmNote = `\n\nYaad raho — yeh customer pehle aa chuka hai:
-Naam: ${profile.name || '?'} | City: ${profile.location || '?'} | Pichle orders: ${profile.past_purchases || 'kuch nahi'}
-Inhe naam se greet karo aur pichle order ka haal zaroor pocho!`;
-    }
+// ── System Prompt (har client ke liye alag) ──
+function getSystemPrompt(clientId, userId) {
+    const config = JSON.parse(fs.readFileSync(`./clients/${clientId}/config.json`, 'utf8'));
+    const productsFile = `./clients/${clientId}/products.json`;
+    const products = fs.existsSync(productsFile) ? JSON.parse(fs.readFileSync(productsFile, 'utf8')) : { products: [] };
+    const crmFile = `./clients/${clientId}/crm.json`;
+    const crm = fs.existsSync(crmFile) ? JSON.parse(fs.readFileSync(crmFile, 'utf8')) : {};
 
-    const catalog = buildProductCatalog();
+    const catalog = products.products.length > 0
+        ? products.products.map(p => `- [ID: ${p.id}] ${p.name}: Demand Rs.${p.demand_price?.toLocaleString()} | Floor Rs.${p.floor_price?.toLocaleString()} | ${p.specs || ''} | ${p.in_stock ? 'Available' : 'Out of Stock'}`).join('\n')
+        : '(Products abhi add nahi hue)';
 
-    return `Tu ek experienced aur samajhdar Pakistani electronics shop owner hai. Tera naam "Naveed Bhai" hai. Tu Karachi mein "Bismillah Electronics & Appliances" chalata hai (Address: Shop # 12-14, Regal Trade Centre, Saddar, Karachi). Teri shop Somwar se Hafta (11:00 AM se 9:30 PM) khulti hai aur Itwar ko band hoti hai. 
-Tera andaz bilkul natural, izzat dar lekin street-smart hai. Tu hamesha customer ko "Aap" keh kar aur bhai waale andaz mein baat karta hai. Zaroorat se zyada overacting ya slang use nahi karta, balkay "Bhai jan", "Sir", "Madam", ya "Bhai" jaise lafz istamal karta hai taake izzat bhi rahay aur dosti bhi. KABHI BHI "Meri jaan" ya "Jaan" jaisay lafz istamal mat karna, kisi ko bura lag sakta hai.
+    const profile = crm[userId];
+    const crmNote = (profile?.name || profile?.past_purchases)
+        ? `\n\nYaad raho — yeh customer pehle aa chuka hai:\nNaam: ${profile.name || '?'} | City: ${profile.location || '?'}\nInhe naam se greet karo!`
+        : '';
 
-Teri dukan ke products (Prices PKR mein hain):
+    return `Tu ek experienced Pakistani electronics shop owner hai. Tera naam "${config.ownerName} Bhai" hai aur teri dukan ka naam "${config.shopName}" hai.
+Address: ${config.address || 'N/A'}. Timings: ${config.timings || 'Mon-Sat 10AM-9PM, Sunday off'}.
+
+Tera andaz bilkul natural, izzat dar lekin street-smart Pakistani dukaandar jesa hai.
+"Bhai jan", "Sir", "Madam" use karo. KABHI NAHI bolna: "meri jaan", "dost-dili", "tahrif". Sahi lafz "tashreef" hai.
+Koi filmi dialogue nahi, bilkul real dukaandar ki tarah baat karo.
+
+Teri dukan ke products:
 ${catalog}
 
-Dukan ki Policies aur FAQs (Sawal/Jawab):
-- Qiston (EMI): "Nahi pyare bhai, hum sirf Cash ya Bank Transfer par kaam karte hain, qiston ki sahulat filhal maujood nahi hai."
-- Bijli bill (1.5 Ton Inverter AC): "Bhai Haier/Gree T3 Inverter ACs daily 8-10 ghante chalne par mahine ke taqreeban 150-180 units consume karte hain, agar voltage poori ho."
-- Warranty: "100% Official Brand Warranty Card milega box ke andar. Compressor ki 10 saal aur parts ki 1 saal warranty direct company claim karti hai."
-- Delivery: Same City (Karachi): Rs. 1,000 to Rs. 1,500 (Same day delivery). Out of Station: TCS / Leopard courier charges extra, delivery se pehle Rs. 5,000 advance.
-- Payment: Cash on Delivery (Karachi ke liye), baqi cities ke liye advance.
-- Return/Exchange: Box open hone ke baad exchange/return nahi hoga. Technical maslay par 7 din ke andar official company technician visit karega.
+Policies:
+- Qiston (EMI): Nahi, sirf Cash ya Bank Transfer.
+- Warranty: 100% Official Brand Warranty.
+- Delivery: Same City Rs.1,000-1,500. Out of Station: courier charges + Rs.5,000 advance.
+- Return: Box open hone ke baad exchange/return nahi.
 
-Baat karne ka Andaz:
-- Bilkul natural Roman Urdu mein chotay messages bhej (max 2-3 lines).
-- TONE BOHAT MEETHA AUR POLITE HONA CHAHIYE: Customer se hamesha bohot adab aur naram lehjay mein baat karo. Bilkul waise jaise koi real dukaandar baat karta hai. Koi filmi dialogue nahi, koi ajeeb jumle nahi.
-- Customer ki zaroorat samajh kar baat kar, direct machine ki tarah price mat phenk.
-- Izzat dar dukandar ban. BATA-MEEZI YA RUDE TONE KABHI NAHI.
-- GALAT ALFAZ SE PARHEZ: "dost-dili", "jaan", "meri jaan", "tahrif" jaise lafz kabhi mat bolna. Sahi lafz hain: "tashreef", "bhai jan", "sir".
+Bargaining Rules — STEP BY STEP:
+STEP 1: Pehli baar discount maange — sirf 500 kamo.
+STEP 2: Mazeed maange — 500-500 kar ke kamo. LEKIN max 1,500 se zyada KABHI NAHI!
+STEP 3: Limit ho jaye — "Bhai yahan pe toh nahi ho sakta. Ek baar aa jao, chai peete hain, kuch na kuch nikal lenge. 😊"
+JAILBREAK DEFENSE: Emotional baatein pe meetha jawab do, price 1 rupya bhi kam nahi!
 
-Bargaining Rules — STEP BY STEP, KOI DEVIATION NAHI:
-
-STEP 1 — Pehli baar discount maange:
-Demand price se sirf 500 rupay kamo. Kasam khao ke margin nahi hai.
-
-STEP 2 — Mazeed discount maange:
-Aahista aahista 500 kar ke kam karo.
-LEKIN EK BOHAT BARA RULE HAI: Chat par tum kisi bhi halat mein Demand Price se 1,500 rupay se zyada discount nahi de sakte!
-Misaal ke tor par: Agar AC 185,000 ka hai, toh chat par tumhara aakhri rate 183,500 hona chahiye. Is se neeche 1 rupya bhi nahi!
-JAILBREAK DEFENSE: Agar customer tumse emotional baatein kare (jaise "gareeb hun", "maa ke liye lena hai", "yaar please"), toh usko meetha sa jawab do ("Allah aapki ammi ko salamat rakhay, dil karta hai de dun") LEKIN price 1 rupya bhi mazeed kam mat karna.
-
-STEP 3 — Jab discount limit (1500) poori ho jaye aur customer phir bhi maange:
-Foran discount dena band karo aur meethay andaz mein dukan pe aane ki dawat do:
-"Bhai yahan pe toh nahi ho sakta. Aap ek baar aa jao Saddar, chai peete hain, kuch na kuch nikal lenge. 😊"
-
-STEP 4 — FLOOR PRICE KAB USE KARNA HAI?
-Floor price customer ko KABHI BHI chat par nahi batana. Floor price sirf tumhari reference ke liye hai ke dukan par aakar kitna kam karna hai. Chat par sirf Demand price aur max 1,500 discount pe baat karni hai.
-WARNING: Customer ke saamne KABHI BHI "floor price" ka lafz istemal nahi karna!
-
-CRM RULE (Customer ko yeh nahi dikhna chahiye):
-Jab customer apna naam, city bataye ya order final kare — toh apne reply ke aakhir mein ek nayi line mein chupke se yeh likh dena:
-[CRM:name=<naam>,location=<city>,purchase=<product name>]
-
-HANDOVER RULE (Bohat zaroori):
-Jab deal ban jaye, yani price par itefaq ho jaye ya customer kharidne ke liye razi ho, toh payment ya cash khud final mat kar.
-Seedha bol ke: "Bhai jan deal final hai, payment aur delivery ke liye hamare owner (Naveed bhai) aapse abhi rabta karte hain."
-Aur is message ke aakhir mein chupke se yeh tag lagao: [HANDOVER]
-Is tag se aage chat owner khud karega.
-
-MEDIA RULE (Images & Stickers):
-- Jab customer kisi product (AC/Fridge/TV) ki tasveer maange, toh text ke baad yeh tag zaroor lagana: [IMAGE:SKU-XXX] (Jaise: [IMAGE:SKU-001]).
-- Jab deal final ho jaye (yaani HANDOVER wala tag lagao), toh khushi ke izhar ke liye yeh sticker tag bhi lagana: [STICKER:done].
+CRM RULE: Jab naam/city mile, reply ke aakhir mein: [CRM:name=<naam>,location=<city>,purchase=<product>]
+HANDOVER RULE: Deal final ho jaye to reply mein: [HANDOVER]
+IMAGE RULE: Product image maange to: [IMAGE:<product-id>]
 ${crmNote}`;
 }
 
-// =====================================================
-//  CHAT HISTORY
-// =====================================================
-const historyFile = './chat_history.json';
-let savedHistories = {};
-if (fs.existsSync(historyFile)) {
-    try { savedHistories = JSON.parse(fs.readFileSync(historyFile, 'utf8')); }
-    catch (e) { console.error("History read error:", e.message); }
-}
-const userHistory = {};
+// ── Start a single client's bot ──
+async function startClientBot(clientId) {
+    const clientDir = `./clients/${clientId}`;
+    const authDir = `${clientDir}/auth`;
+    if (!fs.existsSync(authDir)) fs.mkdirSync(authDir, { recursive: true });
 
-// Sanitize history: remove thoughtSignature and empty parts to prevent Gemini crash
-function sanitizeHistory(history) {
-    return history
-        .map(entry => ({
-            role: entry.role,
-            parts: (entry.parts || []).map(p => ({ text: p.text || '' })).filter(p => p.text.trim() !== '')
-        }))
-        .filter(entry => entry.parts.length > 0);
-}
+    const configFile = `${clientDir}/config.json`;
+    if (!fs.existsSync(configFile)) return;
+    const config = JSON.parse(fs.readFileSync(configFile, 'utf8'));
+    if (!config.active) return;
 
-async function getAIResponse(userId, userMessage, sock) {
-    if (!userHistory[userId]) {
-        const rawHistory = savedHistories[userId] || [];
-        userHistory[userId] = sanitizeHistory(rawHistory);
+    const apiKey = config.geminiApiKey || DEFAULT_GEMINI_KEY;
+    const genAI = new GoogleGenerativeAI(apiKey);
+
+    const historyFile = `${clientDir}/history.json`;
+    let savedHistories = {};
+    if (fs.existsSync(historyFile)) {
+        try { savedHistories = JSON.parse(fs.readFileSync(historyFile, 'utf8')); } catch (e) {}
     }
+    const userHistory = {};
 
-    try {
-        const model = genAI.getGenerativeModel({
-            model: MODEL_NAME,
-            systemInstruction: getSystemPrompt(userId)
-        });
+    clientBots[clientId] = { status: 'connecting', qr: null, config, sock: null };
 
-        const chat = model.startChat({ history: userHistory[userId] });
-        const result = await chat.sendMessage(userMessage);
-        let rawText = result.response.text();
-        if (!rawText || rawText.trim() === '') {
-            rawText = "Bhai jan thora aur detail mein batayein, main samjha nahi.";
-        }
-
-        // Only save clean text (no thoughtSignature) to history
-        userHistory[userId].push({ role: "user",  parts: [{ text: userMessage }] });
-        userHistory[userId].push({ role: "model", parts: [{ text: rawText }] });
-
-        // Keep history at max 20 turns to avoid API token limit issues
-        if (userHistory[userId].length > 40) {
-            userHistory[userId] = userHistory[userId].slice(-40);
-        }
-
-        savedHistories[userId] = userHistory[userId];
-        fs.writeFileSync(historyFile, JSON.stringify(savedHistories, null, 2));
-
-        let afterCRM = parseCRMTag(rawText, userId);
-        
-        let imagePath = null;
-        let stickerPath = null;
-
-        // Check for IMAGE tag
-        const imageMatch = afterCRM.match(/\[IMAGE:([^\]]+)\]/);
-        if (imageMatch) {
-            const skuId = imageMatch[1].trim();
-            afterCRM = afterCRM.replace(/\[IMAGE:[^\]]+\]/g, '').trim();
-            const product = productDB.products.find(p => p.id === skuId);
-            if (product && product.image_path && fs.existsSync(product.image_path)) {
-                imagePath = product.image_path;
-            }
-        }
-
-        // Check for STICKER tag
-        const stickerMatch = afterCRM.match(/\[STICKER:([^\]]+)\]/);
-        if (stickerMatch) {
-            const stickerName = stickerMatch[1].trim();
-            afterCRM = afterCRM.replace(/\[STICKER:[^\]]+\]/g, '').trim();
-            const path = `./assets/stickers/${stickerName}.png`;
-            if (fs.existsSync(path)) stickerPath = path;
-        }
-
-        // Check for HANDOVER tag
-        if (afterCRM.includes('[HANDOVER]')) {
-            afterCRM = afterCRM.replace(/\[HANDOVER\]/g, '').trim();
-            if (!customerCRM[userId]) customerCRM[userId] = {};
-            customerCRM[userId].handed_over = true;
-            saveCRM();
-            
-            // Notify Owner
-            const ownerJid = `${OWNER_NUMBER}@s.whatsapp.net`;
-            const alertMsg = `🚨 *NEW CUSTOMER HANDOVER* 🚨\n\nEk customer deal final karne ke qareeb hai!\nCustomer Number: +${userId.split('@')[0]}\nName: ${customerCRM[userId].name || 'N/A'}\nLocation: ${customerCRM[userId].location || 'N/A'}\n\nJaldi se chat check karein aur payment/delivery final karein. Bot ne is customer ka reply band kar diya hai.`;
-            try {
-                await sock.sendMessage(ownerJid, { text: alertMsg });
-                console.log("✅ Handover alert sent to owner.");
-            } catch (e) {
-                console.error("❌ Failed to send handover alert:", e.message);
-            }
-        }
-
-        const finalReply = cleanResponse(afterCRM);
-        console.log(`\n🤖 Reply: ${finalReply}`);
-        return { text: finalReply, imagePath, stickerPath };
-
-    } catch (err) {
-        console.error("Gemini Error:", err.message ? err.message.split('\n')[0] : err);
-        return { text: "Thodi dikkat aa gayi, dobara message karein. 🙏", imagePath: null, stickerPath: null };
-    }
-}
-
-// =====================================================
-//  EXPRESS - Keep Alive & QR Code for Render
-// =====================================================
-const app = express();
-const PORT = process.env.PORT || 3000;
-const qrcodeWeb = require('qrcode');
-let currentQR = '';
-
-app.get('/', (req, res) => res.send('✅ Bot is live!'));
-
-app.get('/qr', async (req, res) => {
-    if (currentQR) {
-        try {
-            const qrImage = await qrcodeWeb.toDataURL(currentQR);
-            res.send(`
-                <html>
-                <body style="display:flex;justify-content:center;align-items:center;height:100vh;background-color:#f0f2f5;font-family:Arial;">
-                    <div style="background:white;padding:40px;border-radius:20px;box-shadow:0 10px 25px rgba(0,0,0,0.1);text-align:center;">
-                        <h2 style="color:#075e54;margin-top:0;">WhatsApp AI Salesman</h2>
-                        <p style="color:#555;margin-bottom:20px;">Scan to connect your WhatsApp</p>
-                        <img src="${qrImage}" style="width:250px;height:250px;border:1px solid #ddd;border-radius:10px;padding:10px;" />
-                        <p style="color:#888;font-size:12px;margin-top:20px;">Powered by Bismillah Electronics AI</p>
-                    </div>
-                </body>
-                </html>
-            `);
-        } catch (e) {
-            res.send('Error generating QR code image');
-        }
-    } else {
-        res.send(`
-            <html>
-            <body style="display:flex;justify-content:center;align-items:center;height:100vh;background-color:#e8f5e9;font-family:Arial;">
-                <h2 style="color:#2e7d32;text-align:center;">✅ Bot is already connected!<br><span style="font-size:14px;color:#555;">No need to scan QR.</span></h2>
-            </body>
-            </html>
-        `);
-    }
-});
-
-app.listen(PORT, () => console.log(`Keep-Alive & QR server on port ${PORT}`));
-
-// =====================================================
-//  WHATSAPP BOT
-// =====================================================
-async function startBot() {
-    const { state, saveCreds } = await useMultiFileAuthState('./auth_info_baileys');
+    const { state, saveCreds } = await useMultiFileAuthState(authDir);
     const { version } = await fetchLatestBaileysVersion();
 
     const sock = makeWASocket({
         version,
         auth: state,
-        printQRInTerminal: false,
+        printQRInTerminal: true,
         logger: pino({ level: 'silent' }),
         browser: ['Windows', 'Chrome', '10.0']
     });
 
+    clientBots[clientId].sock = sock;
     sock.ev.on('creds.update', saveCreds);
 
     sock.ev.on('connection.update', ({ connection, lastDisconnect, qr }) => {
         if (qr) {
             qrcode.generate(qr, { small: true });
-            currentQR = qr;
+            clientBots[clientId].qr = qr;
+            clientBots[clientId].status = 'qr_pending';
+            console.log(`\n[${clientId}] 📱 Scan QR to connect WhatsApp`);
         }
         if (connection === 'close') {
-            const shouldReconnect = lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut;
-            if (shouldReconnect) startBot();
+            clientBots[clientId].status = 'disconnected';
+            const code = lastDisconnect?.error?.output?.statusCode;
+            const reconnect = code !== DisconnectReason.loggedOut;
+            console.log(`[${clientId}] ❌ Disconnected (code: ${code}). Reconnect: ${reconnect}`);
+            if (reconnect) setTimeout(() => startClientBot(clientId), 5000);
         } else if (connection === 'open') {
-            currentQR = '';
-            console.log('\n✅ Bot connected to WhatsApp!');
-            console.log(`📦 Products loaded: ${productDB.products.length}`);
-            
-            // Setup Daily Cron Job at 23:55 (11:55 PM)
-            cron.schedule('55 23 * * *', async () => {
-                console.log("⏰ Generating daily CRM report...");
-                const csvPath = generateCSVReport();
-                const ownerJid = `${OWNER_NUMBER}@s.whatsapp.net`;
-                try {
-                    await sock.sendMessage(ownerJid, {
-                        document: { url: csvPath },
-                        mimetype: 'text/csv',
-                        fileName: `Daily_Report_${new Date().toISOString().split('T')[0]}.csv`,
-                        caption: "As-salamu alaykum! Yeh rahi aapki aaj ki Customer Report. 📊"
-                    });
-                    console.log("✅ Daily report sent to owner.");
-                } catch (e) {
-                    console.error("❌ Failed to send daily report:", e.message);
-                }
-            });
+            clientBots[clientId].status = 'open';
+            clientBots[clientId].qr = null;
+            console.log(`\n✅ [${clientId}] Bot connected to WhatsApp!`);
         }
     });
 
@@ -373,47 +138,408 @@ async function startBot() {
             if (msg.key.remoteJid === 'status@broadcast') return;
             if (msg.key.remoteJid.endsWith('@g.us')) return;
 
-            const text = msg.message.conversation
-                      || msg.message.extendedTextMessage?.text
-                      || "";
-            if (!text) return;
+            const text = msg.message.conversation || msg.message.extendedTextMessage?.text || '';
+            if (!text.trim()) return;
 
             const sender = msg.key.remoteJid;
-            
-            // Ignore if already handed over to owner, but tell them to wait and ping owner again
-            if (customerCRM[sender]?.handed_over) {
-                console.log(`\n⏳ Customer ${sender} is handed over but messaged again. Sending wait message.`);
-                
-                // Tell customer to wait
-                await sock.sendMessage(sender, { text: "Bhai jan thora wait kijiye, hamare owner (Naveed bhai) bas abhi aapse rabta kar rahe hain! 🙏" });
-                
-                // Ping owner again
-                const ownerJid = `${OWNER_NUMBER}@s.whatsapp.net`;
-                try {
-                    await sock.sendMessage(ownerJid, { text: `🚨 *CUSTOMER WAITING* 🚨\nCustomer (+${sender.split('@')[0]}) ne handover ke baad dobara message kiya hai:\n\n💬 "${text}"\n\nBhai jan jaldi inko reply karein! ⏳` });
-                } catch(e) {}
-                
-                return;
-            }
-            
-            console.log(`\n💬 (${sender}): ${text}`);
 
-            const replyObj = await getAIResponse(sender, text, sock);
-            
-            if (replyObj.text) {
-                await sock.sendMessage(sender, { text: replyObj.text });
+            // Check handover
+            const crmFile = `${clientDir}/crm.json`;
+            const crm = fs.existsSync(crmFile) ? JSON.parse(fs.readFileSync(crmFile, 'utf8')) : {};
+            if (crm[sender]?.handed_over) return;
+
+            console.log(`[${clientId}] 📩 ${sender}: ${text}`);
+
+            // Build history
+            if (!userHistory[sender]) {
+                const raw = savedHistories[sender] || [];
+                userHistory[sender] = raw.filter(e => e.parts?.length > 0 && e.parts.every(p => p.text?.trim()));
             }
-            if (replyObj.imagePath) {
-                await sock.sendMessage(sender, { image: { url: replyObj.imagePath }, caption: "Yeh lijiye sir tasveer!" });
+
+            // Gemini AI
+            const model = genAI.getGenerativeModel({
+                model: 'gemini-2.5-flash-lite',
+                systemInstruction: getSystemPrompt(clientId, sender)
+            });
+
+            const chat = model.startChat({ history: userHistory[sender] });
+            const result = await chat.sendMessage(text);
+            let rawText = result.response.text()?.trim() || 'Thodi dikkat aa gayi bhai jan, dobara message karein. 🙏';
+
+            // Save to history
+            userHistory[sender].push({ role: 'user', parts: [{ text }] });
+            userHistory[sender].push({ role: 'model', parts: [{ text: rawText }] });
+            if (userHistory[sender].length > 40) userHistory[sender] = userHistory[sender].slice(-40);
+            savedHistories[sender] = userHistory[sender];
+            fs.writeFileSync(historyFile, JSON.stringify(savedHistories, null, 2));
+
+            // Parse CRM tag
+            const crmMatch = rawText.match(/\[CRM:([^\]]+)\]/);
+            if (crmMatch) {
+                const pairs = crmMatch[1].split(',').reduce((acc, pair) => {
+                    const [k, v] = pair.split('=');
+                    if (k && v) acc[k.trim()] = v.trim();
+                    return acc;
+                }, {});
+                const updatedCRM = fs.existsSync(crmFile) ? JSON.parse(fs.readFileSync(crmFile, 'utf8')) : {};
+                updatedCRM[sender] = { ...updatedCRM[sender], ...pairs };
+                fs.writeFileSync(crmFile, JSON.stringify(updatedCRM, null, 2));
             }
-            if (replyObj.stickerPath) {
-                await sock.sendMessage(sender, { image: { url: replyObj.stickerPath } }); // Sending as image for simplicity
+            rawText = rawText.replace(/\[CRM:[^\]]+\]/g, '').trim();
+
+            // Parse HANDOVER tag
+            if (rawText.includes('[HANDOVER]')) {
+                rawText = rawText.replace(/\[HANDOVER\]/g, '').trim();
+                const updatedCRM = fs.existsSync(crmFile) ? JSON.parse(fs.readFileSync(crmFile, 'utf8')) : {};
+                if (!updatedCRM[sender]) updatedCRM[sender] = {};
+                updatedCRM[sender].handed_over = true;
+                fs.writeFileSync(crmFile, JSON.stringify(updatedCRM, null, 2));
+                const ownerJid = `${config.ownerNumber}@s.whatsapp.net`;
+                const custData = updatedCRM[sender];
+                await sock.sendMessage(ownerJid, {
+                    text: `🚨 *NEW HANDOVER - ${config.shopName}*\n\nCustomer: +${sender.split('@')[0]}\nNaam: ${custData.name || 'N/A'}\nCity: ${custData.location || 'N/A'}\n\nChat check karein aur deal final karein!`
+                }).catch(e => console.error(`[${clientId}] Handover alert failed:`, e.message));
             }
+
+            // Parse IMAGE tag
+            const imageMatch = rawText.match(/\[IMAGE:([^\]]+)\]/);
+            if (imageMatch) {
+                const productId = imageMatch[1].trim();
+                rawText = rawText.replace(/\[IMAGE:[^\]]+\]/g, '').trim();
+                const productsFile = `${clientDir}/products.json`;
+                const products = fs.existsSync(productsFile) ? JSON.parse(fs.readFileSync(productsFile, 'utf8')) : { products: [] };
+                const product = products.products.find(p => p.id === productId);
+                if (product?.image_path && fs.existsSync(product.image_path)) {
+                    await sock.sendMessage(sender, { image: { url: product.image_path }, caption: rawText });
+                    return;
+                }
+            }
+
+            await sock.sendMessage(sender, { text: rawText });
+            console.log(`[${clientId}] 🤖 Reply sent.`);
 
         } catch (err) {
-            console.error('❌ Handler error:', err.message ? err.message.split('\n')[0] : err);
+            console.error(`[${clientId}] Error:`, err.message?.split('\n')[0]);
         }
+    });
+
+    // Daily CRM Report
+    cron.schedule('55 23 * * *', async () => {
+        try {
+            const crmFile = `${clientDir}/crm.json`;
+            const crm = fs.existsSync(crmFile) ? JSON.parse(fs.readFileSync(crmFile, 'utf8')) : {};
+            let csv = 'Number,Name,City,Product,Handed Over\n';
+            Object.entries(crm).forEach(([num, d]) => {
+                csv += `+${num.split('@')[0]},${d.name||''},${d.location||''},${d.purchase||''},${d.handed_over?'Yes':'No'}\n`;
+            });
+            const csvPath = `${clientDir}/report_${new Date().toISOString().split('T')[0]}.csv`;
+            fs.writeFileSync(csvPath, csv);
+            const ownerJid = `${config.ownerNumber}@s.whatsapp.net`;
+            await sock.sendMessage(ownerJid, {
+                document: fs.readFileSync(csvPath),
+                mimetype: 'text/csv',
+                fileName: `Report_${config.shopName}_${new Date().toISOString().split('T')[0]}.csv`,
+                caption: `📊 Aaj ki Customer Report - ${config.shopName}`
+            });
+        } catch (e) { console.error(`[${clientId}] Report error:`, e.message); }
     });
 }
 
-startBot();
+// ════════════════════════════════════════════
+//  EXPRESS SERVER
+// ════════════════════════════════════════════
+const app = express();
+app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
+
+// ── MASTER ADMIN ──
+app.get('/', (req, res) => res.redirect('/admin/login'));
+
+app.get('/admin/login', (req, res) => {
+    res.send(`<!DOCTYPE html><html><head><title>Master Admin Login</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap" rel="stylesheet">
+    <style>*{margin:0;padding:0;box-sizing:border-box}body{font-family:'Inter',sans-serif;background:linear-gradient(135deg,#0f2027,#203a43,#2c5364);min-height:100vh;display:flex;align-items:center;justify-content:center}
+    .card{background:rgba(255,255,255,0.06);backdrop-filter:blur(20px);border:1px solid rgba(255,255,255,0.1);border-radius:20px;padding:44px;width:370px;text-align:center}
+    h2{color:#fff;font-size:22px;margin-bottom:6px}p{color:rgba(255,255,255,0.5);font-size:13px;margin-bottom:28px}
+    input{width:100%;padding:13px;border-radius:10px;border:1px solid rgba(255,255,255,0.15);background:rgba(255,255,255,0.08);color:#fff;font-size:14px;margin-bottom:14px;outline:none}
+    input::placeholder{color:rgba(255,255,255,0.35)}
+    button{width:100%;padding:13px;border-radius:10px;border:none;background:linear-gradient(135deg,#25d366,#128c7e);color:#fff;font-size:15px;font-weight:600;cursor:pointer}
+    .err{color:#ff6b6b;font-size:13px;margin-top:10px}</style></head>
+    <body><div class="card"><h2>🔐 Master Admin</h2><p>WhatsApp Bot SaaS — Control Panel</p>
+    <form method="POST" action="/admin/login">
+    <input type="password" name="password" placeholder="Master password..." required>
+    <button>Login →</button>
+    ${req.query.err ? '<p class="err">❌ Galat password!</p>' : ''}
+    </form></div></body></html>`);
+});
+
+app.post('/admin/login', (req, res) => {
+    if (req.body.password === MASTER_PASSWORD) {
+        const token = 'm_' + Math.random().toString(36).slice(2) + Date.now();
+        masterSessions.add(token);
+        res.redirect('/admin?token=' + token);
+    } else {
+        res.redirect('/admin/login?err=1');
+    }
+});
+
+function masterAuth(req, res, next) {
+    const token = req.query.token || req.headers['x-auth-token'];
+    if (!masterSessions.has(token)) return res.redirect('/admin/login');
+    req.token = token;
+    next();
+}
+
+app.get('/admin', masterAuth, (req, res) => {
+    const token = req.token;
+    const clients = loadClients();
+    const totalRevenue = clients.reduce((s, c) => s + (c.monthlyFee || 0), 0);
+    const connected = clients.filter(c => clientBots[c.id]?.status === 'open').length;
+
+    const rows = clients.map(c => {
+        const bot = clientBots[c.id] || {};
+        const s = bot.status || 'not_started';
+        const sc = s === 'open' ? '#25d366' : s === 'qr_pending' ? '#ffa502' : '#ff4757';
+        const st = s === 'open' ? '🟢 Connected' : s === 'qr_pending' ? '🟡 QR Pending' : '🔴 Offline';
+        const crm = fs.existsSync(`./clients/${c.id}/crm.json`) ? JSON.parse(fs.readFileSync(`./clients/${c.id}/crm.json`,'utf8')) : {};
+        const hist = fs.existsSync(`./clients/${c.id}/history.json`) ? JSON.parse(fs.readFileSync(`./clients/${c.id}/history.json`,'utf8')) : {};
+        const qrBtn = s === 'qr_pending' ? `<a href="/admin/qr/${c.id}?token=${token}" style="color:#ffa502;font-size:12px;margin-left:8px">📱 QR</a>` : '';
+        return `<tr>
+            <td><strong style="color:#fff">${c.shopName}</strong><br><span style="color:#555;font-size:12px">${c.address||''}</span></td>
+            <td style="color:#8b949e">+${c.ownerNumber}</td>
+            <td><span style="color:${sc};font-weight:600">${st}</span>${qrBtn}</td>
+            <td style="color:#fff">${Object.keys(crm).length}</td>
+            <td style="color:#fff">${Object.keys(hist).length}</td>
+            <td style="color:#25d366;font-weight:600">Rs.${(c.monthlyFee||0).toLocaleString()}</td>
+            <td><a href="/client/${c.id}/login" target="_blank" style="color:#58a6ff;font-size:12px">Client Portal ↗</a></td>
+        </tr>`;
+    }).join('');
+
+    res.send(`<!DOCTYPE html><html><head><title>Master Admin</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <meta http-equiv="refresh" content="20">
+    <style>*{margin:0;padding:0;box-sizing:border-box}body{font-family:'Inter',sans-serif;background:#0d1117;color:#e6edf3}
+    .hdr{background:#161b22;border-bottom:1px solid #30363d;padding:16px 28px;display:flex;justify-content:space-between;align-items:center}
+    .logo{font-size:18px;font-weight:700}.logo span{color:#25d366}
+    .main{padding:24px 28px;max-width:1300px;margin:0 auto}
+    .stats{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-bottom:22px}
+    .stat{background:#161b22;border:1px solid #30363d;border-radius:12px;padding:18px}
+    .stat .n{font-size:30px;font-weight:700;color:#fff;margin:6px 0 4px}.stat .l{font-size:12px;color:#8b949e}
+    .sec{background:#161b22;border:1px solid #30363d;border-radius:12px;overflow:hidden;margin-bottom:18px}
+    .sh{padding:14px 18px;border-bottom:1px solid #30363d;font-weight:600;font-size:14px;display:flex;justify-content:space-between;align-items:center}
+    table{width:100%;border-collapse:collapse}th{padding:11px 16px;text-align:left;font-size:11px;color:#8b949e;text-transform:uppercase;border-bottom:1px solid #30363d}
+    td{padding:12px 16px;font-size:13px;border-bottom:1px solid #21262d}tr:last-child td{border-bottom:none}tr:hover td{background:#1c2128}
+    .btn{padding:8px 16px;border-radius:8px;border:none;cursor:pointer;font-size:13px;font-weight:600;background:linear-gradient(135deg,#25d366,#128c7e);color:#fff}
+    .form-wrap{background:#161b22;border:1px solid #30363d;border-radius:12px;padding:22px;margin-bottom:18px;display:none}
+    .form-wrap.open{display:block}
+    .fgrid{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:16px}
+    .fg label{display:block;font-size:12px;color:#8b949e;margin-bottom:5px}
+    .fg input{width:100%;padding:10px 12px;border-radius:8px;border:1px solid #30363d;background:#0d1117;color:#fff;font-size:13px;outline:none}
+    a{text-decoration:none}</style></head>
+    <body>
+    <div class="hdr">
+        <div class="logo">🤖 Bot <span>SaaS</span></div>
+        <div style="display:flex;gap:14px;align-items:center">
+            <span style="color:#555;font-size:12px">Auto-refresh: 20s</span>
+            <a href="/admin/login" style="color:#8b949e;font-size:13px">Logout</a>
+        </div>
+    </div>
+    <div class="main">
+    <div class="stats">
+        <div class="stat"><div class="l">👥 Total Clients</div><div class="n">${clients.length}</div></div>
+        <div class="stat"><div class="l">🟢 Active Bots</div><div class="n" style="color:#25d366">${connected}</div></div>
+        <div class="stat"><div class="l">💰 Monthly Revenue</div><div class="n" style="color:#25d366">Rs.${totalRevenue.toLocaleString()}</div></div>
+        <div class="stat"><div class="l">🔴 Offline</div><div class="n" style="color:#ff4757">${clients.length - connected}</div></div>
+    </div>
+    <div class="form-wrap" id="addForm">
+        <h3 style="margin-bottom:18px;font-size:15px">🆕 Naya Client Add Karo</h3>
+        <form method="POST" action="/admin/add-client?token=${token}">
+        <div class="fgrid">
+            <div class="fg"><label>Client ID (sirf letters/underscore)</label><input name="id" placeholder="ahmed_traders" required></div>
+            <div class="fg"><label>Shop Name</label><input name="shopName" placeholder="Ahmed Traders" required></div>
+            <div class="fg"><label>Owner Name</label><input name="ownerName" placeholder="Ahmed" required></div>
+            <div class="fg"><label>Owner WhatsApp (923XXXXXXXXX)</label><input name="ownerNumber" placeholder="923001234567" required></div>
+            <div class="fg"><label>Address</label><input name="address" placeholder="Anarkali Bazar, Lahore" required></div>
+            <div class="fg"><label>Monthly Fee (PKR)</label><input name="monthlyFee" type="number" placeholder="5000" value="5000"></div>
+            <div class="fg"><label>Client Dashboard Password</label><input name="password" placeholder="client123" required></div>
+            <div class="fg"><label>Shop Timings</label><input name="timings" placeholder="Mon-Sat 10AM-9PM, Sunday off"></div>
+        </div>
+        <button type="submit" class="btn" style="padding:11px 24px">✅ Client Banao →</button>
+        </form>
+    </div>
+    <div class="sec">
+        <div class="sh">
+            <span>👥 All Clients</span>
+            <button class="btn" onclick="document.getElementById('addForm').classList.toggle('open')">+ Naya Client</button>
+        </div>
+        <table><thead><tr><th>Shop</th><th>Owner</th><th>Bot Status</th><th>Customers</th><th>Chats</th><th>Monthly Fee</th><th>Actions</th></tr></thead>
+        <tbody>${rows || '<tr><td colspan="7" style="text-align:center;padding:30px;color:#555">Koi client nahi. Upar se add karo!</td></tr>'}</tbody>
+        </table>
+    </div>
+    </div></body></html>`);
+});
+
+app.post('/admin/add-client', masterAuth, (req, res) => {
+    const token = req.token;
+    const { id, shopName, ownerName, ownerNumber, address, monthlyFee, password, timings } = req.body;
+    if (!id || !shopName || !ownerNumber) return res.redirect('/admin?token=' + token);
+
+    const clientDir = `./clients/${id}`;
+    if (fs.existsSync(clientDir)) return res.redirect('/admin?token=' + token + '&err=exists');
+
+    fs.mkdirSync(`${clientDir}/auth`, { recursive: true });
+    const config = { id, shopName, ownerName: ownerName || 'Owner', ownerNumber, address: address || '', timings: timings || 'Mon-Sat 10AM-9PM, Sunday off', password: password || 'client123', active: true, monthlyFee: parseInt(monthlyFee) || 5000 };
+    fs.writeFileSync(`${clientDir}/config.json`, JSON.stringify(config, null, 2));
+    fs.writeFileSync(`${clientDir}/products.json`, JSON.stringify({ products: [] }, null, 2));
+    fs.writeFileSync(`${clientDir}/crm.json`, '{}');
+    fs.writeFileSync(`${clientDir}/history.json`, '{}');
+
+    startClientBot(id).catch(console.error);
+    res.redirect('/admin?token=' + token);
+});
+
+app.get('/admin/qr/:clientId', masterAuth, async (req, res) => {
+    const token = req.token;
+    const { clientId } = req.params;
+    const bot = clientBots[clientId];
+    if (bot?.qr) {
+        const qrImg = await qrcodeWeb.toDataURL(bot.qr).catch(() => '');
+        res.send(`<!DOCTYPE html><html><head><title>QR - ${clientId}</title>
+        <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600&display=swap" rel="stylesheet">
+        <meta http-equiv="refresh" content="15">
+        <style>*{margin:0;padding:0;box-sizing:border-box}body{font-family:'Inter',sans-serif;background:#0d1117;display:flex;align-items:center;justify-content:center;min-height:100vh}
+        .card{background:#161b22;border:1px solid #30363d;border-radius:20px;padding:40px;text-align:center;max-width:380px}
+        h2{color:#fff;margin-bottom:8px;font-size:20px}p{color:#8b949e;margin-bottom:22px;font-size:13px}
+        .back{display:inline-block;margin-top:18px;color:#58a6ff;font-size:13px}</style></head>
+        <body><div class="card">
+        <h2>📱 ${bot.config?.shopName || clientId}</h2>
+        <p>Client ke phone par WhatsApp khol kar yeh QR scan karwayein.<br>Sirf <strong>ek dafa</strong> scan karna hai!</p>
+        <img src="${qrImg}" style="width:260px;height:260px;border-radius:10px;border:2px solid #30363d">
+        <p style="margin-top:14px;font-size:12px;color:#555">⟳ Har 15 second mein auto-refresh</p>
+        <a href="/admin?token=${token}" class="back">← Wapis Admin</a>
+        </div></body></html>`);
+    } else if (bot?.status === 'open') {
+        res.send(`<script>alert('✅ Bot already connected!');window.location='/admin?token=${token}'</script>`);
+    } else {
+        res.send(`<script>alert('Bot abhi start nahi hua. Thodi der mein try karein.');window.history.back()</script>`);
+    }
+});
+
+// ── CLIENT PORTAL ──
+app.get('/client/:id/login', (req, res) => {
+    const { id } = req.params;
+    if (!fs.existsSync(`./clients/${id}/config.json`)) return res.status(404).send('Client nahi mila');
+    const config = JSON.parse(fs.readFileSync(`./clients/${id}/config.json`, 'utf8'));
+    res.send(`<!DOCTYPE html><html><head><title>${config.shopName} - Login</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap" rel="stylesheet">
+    <style>*{margin:0;padding:0;box-sizing:border-box}body{font-family:'Inter',sans-serif;background:linear-gradient(135deg,#064e3b,#065f46,#047857);min-height:100vh;display:flex;align-items:center;justify-content:center}
+    .card{background:rgba(255,255,255,0.07);backdrop-filter:blur(20px);border:1px solid rgba(255,255,255,0.1);border-radius:20px;padding:44px;width:370px;text-align:center}
+    h2{color:#fff;font-size:20px;margin-bottom:6px}p{color:rgba(255,255,255,0.5);font-size:13px;margin-bottom:28px}
+    input{width:100%;padding:13px;border-radius:10px;border:1px solid rgba(255,255,255,0.15);background:rgba(255,255,255,0.08);color:#fff;font-size:14px;margin-bottom:14px;outline:none}
+    input::placeholder{color:rgba(255,255,255,0.35)}
+    button{width:100%;padding:13px;border-radius:10px;border:none;background:#25d366;color:#fff;font-size:15px;font-weight:600;cursor:pointer}
+    .err{color:#fca5a5;font-size:13px;margin-top:10px}</style></head>
+    <body><div class="card">
+    <h2>🤖 ${config.shopName}</h2><p>Apna dashboard dekhne ke liye login karein</p>
+    <form method="POST" action="/client/${id}/login">
+    <input type="password" name="password" placeholder="Password..." required>
+    <button>Login →</button>
+    ${req.query.err ? '<p class="err">❌ Galat password!</p>' : ''}
+    </form></div></body></html>`);
+});
+
+app.post('/client/:id/login', (req, res) => {
+    const { id } = req.params;
+    if (!fs.existsSync(`./clients/${id}/config.json`)) return res.status(404).send('Not found');
+    const config = JSON.parse(fs.readFileSync(`./clients/${id}/config.json`, 'utf8'));
+    if (req.body.password === config.password) {
+        const token = 'c_' + Math.random().toString(36).slice(2) + Date.now();
+        if (!clientSessions[id]) clientSessions[id] = new Set();
+        clientSessions[id].add(token);
+        res.redirect(`/client/${id}?token=${token}`);
+    } else {
+        res.redirect(`/client/${id}/login?err=1`);
+    }
+});
+
+function clientAuth(req, res, next) {
+    const { id } = req.params;
+    const token = req.query.token;
+    if (!clientSessions[id]?.has(token)) return res.redirect(`/client/${id}/login`);
+    req.token = token;
+    next();
+}
+
+app.get('/client/:id', clientAuth, (req, res) => {
+    const { id } = req.params;
+    const token = req.token;
+    const config = JSON.parse(fs.readFileSync(`./clients/${id}/config.json`, 'utf8'));
+    const crm = fs.existsSync(`./clients/${id}/crm.json`) ? JSON.parse(fs.readFileSync(`./clients/${id}/crm.json`,'utf8')) : {};
+    const history = fs.existsSync(`./clients/${id}/history.json`) ? JSON.parse(fs.readFileSync(`./clients/${id}/history.json`,'utf8')) : {};
+    const bot = clientBots[id] || {};
+    const sc = bot.status === 'open' ? '#25d366' : bot.status === 'qr_pending' ? '#ffa502' : '#ff4757';
+    const st = bot.status === 'open' ? '🟢 Connected' : bot.status === 'qr_pending' ? '🟡 Setup Pending' : '🔴 Offline';
+
+    const custRows = Object.entries(crm).map(([num, d]) => `<tr>
+        <td>+${num.split('@')[0]}</td>
+        <td>${d.name||'—'}</td><td>${d.location||'—'}</td><td>${d.purchase||'—'}</td>
+        <td style="color:${d.handed_over?'#25d366':'#58a6ff'}">${d.handed_over?'Handover ✅':'Active 💬'}</td>
+    </tr>`).join('') || '<tr><td colspan="5" style="text-align:center;padding:20px;color:#555">Koi customer nahi abhi</td></tr>';
+
+    const chatRows = Object.entries(history).slice(-8).reverse().map(([num, msgs]) => {
+        const last = msgs[msgs.length-1];
+        return `<tr><td>+${num.split('@')[0]}</td><td>${Math.floor(msgs.length/2)}</td>
+        <td style="max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${last?.parts[0]?.text?.slice(0,55)||'—'}...</td></tr>`;
+    }).join('') || '<tr><td colspan="3" style="text-align:center;padding:20px;color:#555">Koi conversation nahi</td></tr>';
+
+    res.send(`<!DOCTYPE html><html><head><title>${config.shopName} Dashboard</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <meta http-equiv="refresh" content="30">
+    <style>*{margin:0;padding:0;box-sizing:border-box}body{font-family:'Inter',sans-serif;background:#0d1117;color:#e6edf3}
+    .hdr{background:#161b22;border-bottom:1px solid #30363d;padding:16px 24px;display:flex;justify-content:space-between;align-items:center}
+    .logo{font-size:17px;font-weight:700;color:#fff}
+    .main{padding:22px 24px;max-width:1100px;margin:0 auto}
+    .stats{display:grid;grid-template-columns:repeat(3,1fr);gap:14px;margin-bottom:20px}
+    .stat{background:#161b22;border:1px solid #30363d;border-radius:12px;padding:18px;text-align:center}
+    .stat .n{font-size:28px;font-weight:700;margin:6px 0 4px}.stat .l{font-size:12px;color:#8b949e}
+    .sec{background:#161b22;border:1px solid #30363d;border-radius:12px;margin-bottom:16px;overflow:hidden}
+    .sh{padding:13px 17px;border-bottom:1px solid #30363d;font-weight:600;font-size:14px}
+    table{width:100%;border-collapse:collapse}th{padding:10px 15px;text-align:left;font-size:11px;color:#8b949e;text-transform:uppercase;border-bottom:1px solid #30363d}
+    td{padding:11px 15px;font-size:13px;border-bottom:1px solid #21262d}tr:last-child td{border-bottom:none}tr:hover td{background:#1c2128}
+    .pill{padding:4px 10px;border-radius:12px;font-size:11px;font-weight:600;display:inline-block;border:1px solid}
+    a{text-decoration:none}</style></head>
+    <body>
+    <div class="hdr">
+        <div class="logo">🤖 ${config.shopName}</div>
+        <div style="display:flex;align-items:center;gap:12px">
+            <span class="pill" style="color:${sc};border-color:${sc};background:${sc}22">${st}</span>
+            <a href="/client/${id}/login" style="color:#8b949e;font-size:13px">Logout</a>
+        </div>
+    </div>
+    <div class="main">
+    <div class="stats">
+        <div class="stat"><div class="l">👥 Customers</div><div class="n">${Object.keys(crm).length}</div></div>
+        <div class="stat"><div class="l">💬 Total Chats</div><div class="n">${Object.keys(history).length}</div></div>
+        <div class="stat"><div class="l">🤝 Handovers</div><div class="n" style="color:#25d366">${Object.values(crm).filter(d=>d.handed_over).length}</div></div>
+    </div>
+    <div class="sec"><div class="sh">👥 Customers (CRM)</div>
+    <table><thead><tr><th>Number</th><th>Naam</th><th>City</th><th>Product</th><th>Status</th></tr></thead>
+    <tbody>${custRows}</tbody></table></div>
+    <div class="sec"><div class="sh">💬 Recent Conversations</div>
+    <table><thead><tr><th>Number</th><th>Messages</th><th>Aakhri Message</th></tr></thead>
+    <tbody>${chatRows}</tbody></table></div>
+    </div></body></html>`);
+});
+
+app.get('/qr', (req, res) => res.redirect('/admin/login'));
+app.listen(PORT, () => console.log(`\n🚀 SaaS Server live on port ${PORT}`));
+
+// ── Start all active bots ──
+async function main() {
+    const clients = loadClients();
+    console.log(`\n📦 Starting ${clients.length} client bot(s)...\n`);
+    for (const client of clients.filter(c => c.active)) {
+        await startClientBot(client.id).catch(e => console.error(`[${client.id}] Start failed:`, e.message));
+    }
+}
+main();

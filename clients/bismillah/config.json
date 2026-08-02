@@ -1,0 +1,12 @@
+{
+  "id": "bismillah",
+  "shopName": "Bismillah Electronics & Appliances",
+  "ownerName": "Naveed",
+  "ownerNumber": "923350316442",
+  "address": "Shop # 12-14, Regal Trade Centre, Saddar, Karachi",
+  "timings": "Somwar se Hafta, 11:00 AM se 9:30 PM. Itwar band.",
+  "password": "bismillah123",
+  "active": true,
+  "geminiApiKey": "",
+  "monthlyFee": 5000
+}

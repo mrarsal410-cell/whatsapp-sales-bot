@@ -1,0 +1,54 @@
+{
+  "products": [
+    {
+      "id": "SKU-001",
+      "category": "Air Conditioner",
+      "name": "Haier 1.5 Ton Inverter AC (HSU-18HFC)",
+      "specs": "DC Inverter, Heat & Cool, T3 Compressor, 10 Year Warranty",
+      "demand_price": 185000,
+      "floor_price": 182500,
+      "in_stock": true,
+      "image_path": "./assets/images/sku-001.png"
+    },
+    {
+      "id": "SKU-002",
+      "category": "Air Conditioner",
+      "name": "Gree 1.5 Ton Fairy Inverter (Fairy-18H)",
+      "specs": "1.5 Ton, Wifi Enabled, Energy Saving Up to 60%, White",
+      "demand_price": 210000,
+      "floor_price": 207500,
+      "in_stock": true,
+      "image_path": "./assets/images/sku-002.png"
+    },
+    {
+      "id": "SKU-003",
+      "category": "Refrigerator",
+      "name": "Dawlance Chromane Inverter Refrigerator (9173 WB)",
+      "specs": "14 Cu Ft, Glass Door, Inverter Technology, 55% Energy Saving",
+      "demand_price": 115000,
+      "floor_price": 112500,
+      "in_stock": true,
+      "image_path": "./assets/images/sku-003.png"
+    },
+    {
+      "id": "SKU-004",
+      "category": "Washing Machine",
+      "name": "Haier Automatic Top Load 9kg (HWM 90-1789)",
+      "specs": "Fully Automatic, Fuzzy Logic, Pillow Drum, 10 Year Motor Warranty",
+      "demand_price": 78000,
+      "floor_price": 76000,
+      "in_stock": true,
+      "image_path": "./assets/images/sku-004.png"
+    },
+    {
+      "id": "SKU-005",
+      "category": "LED TV",
+      "name": "TCL 43 Inch 4K UHD Smart Android LED (43P635)",
+      "specs": "4K HDR10, Google TV, Dolby Audio, Bezel-less Design",
+      "demand_price": 92000,
+      "floor_price": 89500,
+      "in_stock": false,
+      "image_path": "./assets/images/sku-005.png"
+    }
+  ]
+}
