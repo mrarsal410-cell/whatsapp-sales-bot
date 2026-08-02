@@ -1,74 +1,54 @@
 {
   "products": [
     {
-      "name": "Gree AC 1 Ton Inverter",
-      "category": "AC",
-      "listedPrice": 95000,
-      "floorPrice": 82000,
-      "description": "1 Ton, Inverter, Heat & Cool, Energy Saver"
+      "id": "SKU-001",
+      "category": "Air Conditioner",
+      "name": "Haier 1.5 Ton Inverter AC (HSU-18HFC)",
+      "specs": "DC Inverter, Heat & Cool, T3 Compressor, 10 Year Warranty",
+      "demand_price": 185000,
+      "floor_price": 182500,
+      "in_stock": true,
+      "image_path": "./assets/images/sku-001.png"
     },
     {
-      "name": "Gree AC 1.5 Ton Inverter",
-      "category": "AC",
-      "listedPrice": 115000,
-      "floorPrice": 98000,
-      "description": "1.5 Ton, Inverter, Heat & Cool, 5 Star Rating"
+      "id": "SKU-002",
+      "category": "Air Conditioner",
+      "name": "Gree 1.5 Ton Fairy Inverter (Fairy-18H)",
+      "specs": "1.5 Ton, Wifi Enabled, Energy Saving Up to 60%, White",
+      "demand_price": 210000,
+      "floor_price": 207500,
+      "in_stock": true,
+      "image_path": "./assets/images/sku-002.png"
     },
     {
-      "name": "Haier AC 1.5 Ton",
-      "category": "AC",
-      "listedPrice": 105000,
-      "floorPrice": 90000,
-      "description": "1.5 Ton, Inverter, WiFi Control, Auto Clean"
+      "id": "SKU-003",
+      "category": "Refrigerator",
+      "name": "Dawlance Chromane Inverter Refrigerator (9173 WB)",
+      "specs": "14 Cu Ft, Glass Door, Inverter Technology, 55% Energy Saving",
+      "demand_price": 115000,
+      "floor_price": 112500,
+      "in_stock": true,
+      "image_path": "./assets/images/sku-003.png"
     },
     {
-      "name": "Samsung 43 inch Smart TV",
-      "category": "TV",
-      "listedPrice": 85000,
-      "floorPrice": 72000,
-      "description": "43 inch, 4K UHD, Smart TV, WiFi, HDMI x3"
-    },
-    {
-      "name": "Sony Bravia 43 inch",
-      "category": "TV",
-      "listedPrice": 135000,
-      "floorPrice": 118000,
-      "description": "43 inch, 4K, Android TV, Dolby Audio, Google TV"
-    },
-    {
-      "name": "TCL 55 inch Smart TV",
-      "category": "TV",
-      "listedPrice": 95000,
-      "floorPrice": 82000,
-      "description": "55 inch, 4K, Android TV, HDR, HDMI x3"
-    },
-    {
-      "name": "Dawlance Refrigerator 14 CFT",
-      "category": "Fridge",
-      "listedPrice": 65000,
-      "floorPrice": 55000,
-      "description": "14 CFT, Double Door, Inverter, No Frost"
-    },
-    {
-      "name": "Haier Refrigerator 16 CFT",
-      "category": "Fridge",
-      "listedPrice": 78000,
-      "floorPrice": 66000,
-      "description": "16 CFT, Double Door, Inverter, Glass Door"
-    },
-    {
-      "name": "Samsung Washing Machine 8kg",
+      "id": "SKU-004",
       "category": "Washing Machine",
-      "listedPrice": 55000,
-      "floorPrice": 46000,
-      "description": "8kg, Fully Automatic, Front Load, Inverter"
+      "name": "Haier Automatic Top Load 9kg (HWM 90-1789)",
+      "specs": "Fully Automatic, Fuzzy Logic, Pillow Drum, 10 Year Motor Warranty",
+      "demand_price": 78000,
+      "floor_price": 76000,
+      "in_stock": true,
+      "image_path": "./assets/images/sku-004.png"
     },
     {
-      "name": "Haier Washing Machine 10kg",
-      "category": "Washing Machine",
-      "listedPrice": 62000,
-      "floorPrice": 52000,
-      "description": "10kg, Fully Automatic, Top Load, Steam Wash"
+      "id": "SKU-005",
+      "category": "LED TV",
+      "name": "TCL 43 Inch 4K UHD Smart Android LED (43P635)",
+      "specs": "4K HDR10, Google TV, Dolby Audio, Bezel-less Design",
+      "demand_price": 92000,
+      "floor_price": 89500,
+      "in_stock": false,
+      "image_path": "./assets/images/sku-005.png"
     }
   ]
 }
