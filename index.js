@@ -275,12 +275,46 @@ async function getAIResponse(userId, userMessage, sock) {
 }
 
 // =====================================================
-//  EXPRESS - Keep Alive for Render
+//  EXPRESS - Keep Alive & QR Code for Render
 // =====================================================
 const app = express();
 const PORT = process.env.PORT || 3000;
+const qrcodeWeb = require('qrcode');
+let currentQR = '';
+
 app.get('/', (req, res) => res.send('✅ Bot is live!'));
-app.listen(PORT, () => console.log(`Keep-Alive server on port ${PORT}`));
+
+app.get('/qr', async (req, res) => {
+    if (currentQR) {
+        try {
+            const qrImage = await qrcodeWeb.toDataURL(currentQR);
+            res.send(`
+                <html>
+                <body style="display:flex;justify-content:center;align-items:center;height:100vh;background-color:#f0f2f5;font-family:Arial;">
+                    <div style="background:white;padding:40px;border-radius:20px;box-shadow:0 10px 25px rgba(0,0,0,0.1);text-align:center;">
+                        <h2 style="color:#075e54;margin-top:0;">WhatsApp AI Salesman</h2>
+                        <p style="color:#555;margin-bottom:20px;">Scan to connect your WhatsApp</p>
+                        <img src="${qrImage}" style="width:250px;height:250px;border:1px solid #ddd;border-radius:10px;padding:10px;" />
+                        <p style="color:#888;font-size:12px;margin-top:20px;">Powered by Bismillah Electronics AI</p>
+                    </div>
+                </body>
+                </html>
+            `);
+        } catch (e) {
+            res.send('Error generating QR code image');
+        }
+    } else {
+        res.send(`
+            <html>
+            <body style="display:flex;justify-content:center;align-items:center;height:100vh;background-color:#e8f5e9;font-family:Arial;">
+                <h2 style="color:#2e7d32;text-align:center;">✅ Bot is already connected!<br><span style="font-size:14px;color:#555;">No need to scan QR.</span></h2>
+            </body>
+            </html>
+        `);
+    }
+});
+
+app.listen(PORT, () => console.log(`Keep-Alive & QR server on port ${PORT}`));
 
 // =====================================================
 //  WHATSAPP BOT
@@ -300,11 +334,15 @@ async function startBot() {
     sock.ev.on('creds.update', saveCreds);
 
     sock.ev.on('connection.update', ({ connection, lastDisconnect, qr }) => {
-        if (qr) qrcode.generate(qr, { small: true });
+        if (qr) {
+            qrcode.generate(qr, { small: true });
+            currentQR = qr;
+        }
         if (connection === 'close') {
             const shouldReconnect = lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut;
             if (shouldReconnect) startBot();
         } else if (connection === 'open') {
+            currentQR = '';
             console.log('\n✅ Bot connected to WhatsApp!');
             console.log(`📦 Products loaded: ${productDB.products.length}`);
             
