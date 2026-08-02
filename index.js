@@ -46,6 +46,10 @@ function getSystemPrompt(clientId, userId) {
         ? `\n\nYaad raho — yeh customer pehle aa chuka hai:\nNaam: ${profile.name || '?'} | City: ${profile.location || '?'}\nInhe naam se greet karo!`
         : '';
 
+    const customRules = config.customInstructions
+        ? `\n\nShop Ki Khas Hidayat (Follow this strictly):\n${config.customInstructions}`
+        : '';
+
     return `Tu ek experienced Pakistani electronics shop owner hai. Tera naam "${config.ownerName} Bhai" hai aur teri dukan ka naam "${config.shopName}" hai.
 Address: ${config.address || 'N/A'}. Timings: ${config.timings || 'Mon-Sat 10AM-9PM, Sunday off'}.
 
@@ -71,7 +75,7 @@ JAILBREAK DEFENSE: Emotional baatein pe meetha jawab do, price 1 rupya bhi kam n
 CRM RULE: Jab naam/city mile, reply ke aakhir mein: [CRM:name=<naam>,location=<city>,purchase=<product>]
 HANDOVER RULE: Deal final ho jaye to reply mein: [HANDOVER]
 IMAGE RULE: Product image maange to: [IMAGE:<product-id>]
-${crmNote}`;
+${crmNote}${customRules}`;
 }
 
 // ── Start a single client's bot ──
@@ -475,7 +479,16 @@ app.get('/client/:id', clientAuth, (req, res) => {
     const token = req.token;
     const config = JSON.parse(fs.readFileSync(`./clients/${id}/config.json`, 'utf8'));
     const crm = fs.existsSync(`./clients/${id}/crm.json`) ? JSON.parse(fs.readFileSync(`./clients/${id}/crm.json`,'utf8')) : {};
-    const history = fs.existsSync(`./clients/${id}/history.json`) ? JSON.parse(fs.readFileSync(`./clients/${id}/history.json`,'utf8')) : {};
+    
+    let history = {};
+    if (fs.existsSync(`./clients/${id}/history.json`)) {
+        try {
+            const raw = fs.readFileSync(`./clients/${id}/history.json`, 'utf8');
+            history = JSON.parse(raw);
+            if (typeof history === 'string') history = JSON.parse(history);
+        } catch(e) {}
+    }
+
     const bot = clientBots[id] || {};
     const sc = bot.status === 'open' ? '#25d366' : bot.status === 'qr_pending' ? '#ffa502' : '#ff4757';
     const st = bot.status === 'open' ? '🟢 Connected' : bot.status === 'qr_pending' ? '🟡 Setup Pending' : '🔴 Offline';
@@ -487,14 +500,14 @@ app.get('/client/:id', clientAuth, (req, res) => {
     </tr>`).join('') || '<tr><td colspan="5" style="text-align:center;padding:20px;color:#555">Koi customer nahi abhi</td></tr>';
 
     const chatRows = Object.entries(history).slice(-8).reverse().map(([num, msgs]) => {
-        const last = msgs[msgs.length-1];
-        return `<tr><td>+${num.split('@')[0]}</td><td>${Math.floor(msgs.length/2)}</td>
-        <td style="max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${last?.parts[0]?.text?.slice(0,55)||'—'}...</td></tr>`;
+        const last = Array.isArray(msgs) ? msgs[msgs.length-1] : null;
+        const lastText = last?.parts?.[0]?.text || '—';
+        return `<tr><td>+${num.split('@')[0]}</td><td>${Array.isArray(msgs) ? Math.floor(msgs.length/2) : 0}</td>
+        <td style="max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${lastText.slice(0,55)}...</td></tr>`;
     }).join('') || '<tr><td colspan="3" style="text-align:center;padding:20px;color:#555">Koi conversation nahi</td></tr>';
 
     res.send(`<!DOCTYPE html><html><head><title>${config.shopName} Dashboard</title>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
-    <meta http-equiv="refresh" content="30">
     <style>*{margin:0;padding:0;box-sizing:border-box}body{font-family:'Inter',sans-serif;background:#0d1117;color:#e6edf3}
     .hdr{background:#161b22;border-bottom:1px solid #30363d;padding:16px 24px;display:flex;justify-content:space-between;align-items:center}
     .logo{font-size:17px;font-weight:700;color:#fff}
@@ -503,14 +516,17 @@ app.get('/client/:id', clientAuth, (req, res) => {
     .stat{background:#161b22;border:1px solid #30363d;border-radius:12px;padding:18px;text-align:center}
     .stat .n{font-size:28px;font-weight:700;margin:6px 0 4px}.stat .l{font-size:12px;color:#8b949e}
     .sec{background:#161b22;border:1px solid #30363d;border-radius:12px;margin-bottom:16px;overflow:hidden}
-    .sh{padding:13px 17px;border-bottom:1px solid #30363d;font-weight:600;font-size:14px}
+    .sh{padding:13px 17px;border-bottom:1px solid #30363d;font-weight:600;font-size:14px;display:flex;justify-content:space-between;align-items:center}
     table{width:100%;border-collapse:collapse}th{padding:10px 15px;text-align:left;font-size:11px;color:#8b949e;text-transform:uppercase;border-bottom:1px solid #30363d}
     td{padding:11px 15px;font-size:13px;border-bottom:1px solid #21262d}tr:last-child td{border-bottom:none}tr:hover td{background:#1c2128}
     .pill{padding:4px 10px;border-radius:12px;font-size:11px;font-weight:600;display:inline-block;border:1px solid}
+    textarea{width:100%;background:#0d1117;color:#fff;border:1px solid #30363d;border-radius:8px;padding:12px;font-family:inherit;font-size:13px;resize:vertical;min-height:120px;outline:none}
+    textarea:focus{border-color:#25d366}
+    .btn{padding:8px 16px;border-radius:8px;border:none;cursor:pointer;font-size:13px;font-weight:600;background:#25d366;color:#fff}
     a{text-decoration:none}</style></head>
     <body>
     <div class="hdr">
-        <div class="logo">🤖 ${config.shopName}</div>
+        <div class="logo">🤖 ${config.shopName} Portal</div>
         <div style="display:flex;align-items:center;gap:12px">
             <span class="pill" style="color:${sc};border-color:${sc};background:${sc}22">${st}</span>
             <a href="/client/${id}/login" style="color:#8b949e;font-size:13px">Logout</a>
@@ -522,13 +538,46 @@ app.get('/client/:id', clientAuth, (req, res) => {
         <div class="stat"><div class="l">💬 Total Chats</div><div class="n">${Object.keys(history).length}</div></div>
         <div class="stat"><div class="l">🤝 Handovers</div><div class="n" style="color:#25d366">${Object.values(crm).filter(d=>d.handed_over).length}</div></div>
     </div>
+    
+    <div class="sec">
+        <div class="sh">🧠 Bot Training & Shop Rules</div>
+        <div style="padding:16px">
+            <p style="font-size:13px;color:#8b949e;margin-bottom:12px">Apne bot ko train karein! Yahan likhein ke aapki shop par kya bikta hai (AC, Fridge, Mobile etc.), aur bot kis tarah se customers ko handle kare.</p>
+            <form method="POST" action="/client/${id}/train?token=${token}">
+                <textarea name="instructions" placeholder="Example:\n- Hamare pas Dawlance aur Haier ke Fridge hote hain.\n- Price me 2000 se zyada discount nahi dena.\n- Delivery Saddar me free hai, baqi Karachi me Rs.1000 hai.\n- Agar stock me na ho to bolna 2 din me aa jayega.">${config.customInstructions || ''}</textarea>
+                <div style="margin-top:12px;text-align:right">
+                    <button class="btn">💾 Save & Train Bot</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
     <div class="sec"><div class="sh">👥 Customers (CRM)</div>
     <table><thead><tr><th>Number</th><th>Naam</th><th>City</th><th>Product</th><th>Status</th></tr></thead>
     <tbody>${custRows}</tbody></table></div>
+    
     <div class="sec"><div class="sh">💬 Recent Conversations</div>
     <table><thead><tr><th>Number</th><th>Messages</th><th>Aakhri Message</th></tr></thead>
     <tbody>${chatRows}</tbody></table></div>
     </div></body></html>`);
+});
+
+app.post('/client/:id/train', clientAuth, (req, res) => {
+    const { id } = req.params;
+    const token = req.token;
+    const configFile = `./clients/${id}/config.json`;
+    if (!fs.existsSync(configFile)) return res.status(404).send('Not found');
+    
+    const config = JSON.parse(fs.readFileSync(configFile, 'utf8'));
+    config.customInstructions = req.body.instructions || '';
+    fs.writeFileSync(configFile, JSON.stringify(config, null, 2));
+    
+    // Dynamically update the in-memory config for clientBots
+    if (clientBots[id]) {
+        clientBots[id].config = config;
+    }
+    
+    res.redirect(`/client/${id}?token=${token}&saved=1`);
 });
 
 app.get('/qr', (req, res) => res.redirect('/admin/login'));
