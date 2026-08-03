@@ -162,7 +162,7 @@ async function startClientBot(clientId) {
 
             // Gemini AI
             const model = genAI.getGenerativeModel({
-                model: 'gemini-2.5-flash',
+                model: 'gemini-3.1-flash-lite',
                 systemInstruction: getSystemPrompt(clientId, sender)
             });
 
@@ -257,7 +257,7 @@ app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
 // ── MASTER ADMIN ──
-app.get('/', (req, res) => res.redirect('/admin/login'));
+app.get('/', (req, res) => res.send('✅ SaaS Server is Live!'));
 
 app.get('/admin/login', (req, res) => {
     res.send(`<!DOCTYPE html><html><head><title>Master Admin Login</title>
